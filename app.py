@@ -10,13 +10,27 @@ from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse, parse_qs
 
 import requests
+import gdown
 from fastapi import FastAPI, UploadFile, File, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from docx import Document
 from docx.shared import Pt
 from groq import Groq
 
-app = FastAPI(title="Worker Telegram → Groq → DOCX", version="4.0.0")
+app = FastAPI(title="Worker Telegram → Groq → DOCX", version="6.0.0")
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "ok": False,
+            "error": str(exc),
+            "type": exc.__class__.__name__,
+            "hint": "Veja os logs do Railway para detalhes completos."
+        },
+    )
+
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -34,7 +48,7 @@ def root():
     return {
         "ok": True,
         "service": "transcritor-groq-worker",
-        "version": "4.0.0",
+        "version": "6.0.0",
         "routes": [
             "/health",
             "/process-telegram-media",
@@ -47,7 +61,7 @@ def root():
 def health():
     return {
         "ok": True,
-        "version": "4.0.0",
+        "version": "6.0.0",
         "groq_key_configured": bool(GROQ_API_KEY),
         "telegram_token_configured": bool(TELEGRAM_BOT_TOKEN),
         "transcription_model": GROQ_TRANSCRIPTION_MODEL,
@@ -100,33 +114,44 @@ def google_drive_direct_url(url: str) -> str:
     return f"https://drive.google.com/uc?export=download&id={file_id}"
 
 
+def extract_google_drive_file_id(url: str) -> Optional[str]:
+    if "drive.google.com" not in url:
+        return None
+
+    m = re.search(r"/file/d/([^/]+)", url)
+    if m:
+        return m.group(1)
+
+    qs = parse_qs(urlparse(url).query)
+    if "id" in qs:
+        return qs["id"][0]
+
+    return None
+
+
 def download_google_drive_or_url(url: str, output_path: Path):
-    url = google_drive_direct_url(url)
+    """
+    Baixa arquivo por URL.
+    Para Google Drive, usa gdown, que lida melhor com páginas de confirmação
+    de arquivos grandes.
+    """
+    file_id = extract_google_drive_file_id(url)
 
-    # Tentativa simples primeiro.
-    session = requests.Session()
-    response = session.get(url, stream=True, timeout=120)
+    if file_id:
+        gdown_url = f"https://drive.google.com/uc?id={file_id}"
+        result = gdown.download(gdown_url, str(output_path), quiet=False, fuzzy=True)
+        if not result or not output_path.exists() or output_path.stat().st_size < 1024:
+            raise RuntimeError(
+                "Não consegui baixar o arquivo do Google Drive. "
+                "Confirme que o compartilhamento está como 'Qualquer pessoa com o link pode visualizar'."
+            )
+        return
 
-    # Google Drive pode exigir confirm token para arquivo grande.
-    token = None
-    for key, value in response.cookies.items():
-        if key.startswith("download_warning"):
-            token = value
-            break
+    # URL comum fora do Drive
+    download_url(url, output_path)
 
-    if token:
-        parsed = urlparse(url)
-        qs = parse_qs(parsed.query)
-        file_id = qs.get("id", [None])[0]
-        if file_id:
-            url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
-            response = session.get(url, stream=True, timeout=120)
-
-    response.raise_for_status()
-    with open(output_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                f.write(chunk)
+    if not output_path.exists() or output_path.stat().st_size < 1024:
+        raise RuntimeError("O download do link falhou ou retornou arquivo vazio.")
 
 
 def download_telegram_file(file_id: str, output_path: Path):
@@ -356,7 +381,7 @@ def process_file(input_path: Path, original_name: str, workdir: Path) -> Path:
 
 
 @app.post("/process-telegram-media")
-async def process_telegram_media(request: Request, file: UploadFile = File(None)):
+async def process_telegram_media(request: Request, file: Optional[UploadFile] = File(default=None)):
     """
     Endpoint antigo: recebe o binário diretamente do n8n.
     Mantido para áudio pequeno que já estava funcionando.

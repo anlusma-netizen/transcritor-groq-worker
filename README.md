@@ -1,6 +1,6 @@
 # Worker Telegram → Groq → DOCX
 
-Versão 4.
+Versão 6. Correção para Google Drive grande usando gdown e mensagens de erro melhores.
 
 ## Rotas
 
