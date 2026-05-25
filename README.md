@@ -1,6 +1,6 @@
 # Worker Telegram → Groq → DOCX
 
-Versão 7. Corrige erro de limite de tokens da Groq na tradução, dividindo o texto em blocos menores com retry.
+Versão 8. Corrige limite de tokens da Groq dividindo a tradução em blocos menores. Arquivo validado contra erro de sintaxe.
 
 ## Rotas
 
@@ -42,8 +42,7 @@ A resposta precisa mostrar:
 ## Variáveis opcionais para arquivos grandes
 
 ```txt
-TRANSLATION_CHUNK_CHARS=4500
-TRANSLATION_DELAY_SECONDS=8
+TRANSLATION_CHUNK_CHARS=3000
+TRANSLATION_DELAY_SECONDS=12
+TRANSLATION_RETRY_WAIT_SECONDS=70
 ```
-
-Se a Groq ainda reclamar de limite de tokens, reduza `TRANSLATION_CHUNK_CHARS` para 3000 e aumente `TRANSLATION_DELAY_SECONDS` para 15.
