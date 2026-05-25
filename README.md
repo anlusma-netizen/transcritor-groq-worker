@@ -1,6 +1,6 @@
 # Worker Telegram → Groq → DOCX
 
-Versão 6. Correção para Google Drive grande usando gdown e mensagens de erro melhores.
+Versão 7. Corrige erro de limite de tokens da Groq na tradução, dividindo o texto em blocos menores com retry.
 
 ## Rotas
 
@@ -37,3 +37,13 @@ A resposta precisa mostrar:
   "telegram_token_configured": true
 }
 ```
+
+
+## Variáveis opcionais para arquivos grandes
+
+```txt
+TRANSLATION_CHUNK_CHARS=4500
+TRANSLATION_DELAY_SECONDS=8
+```
+
+Se a Groq ainda reclamar de limite de tokens, reduza `TRANSLATION_CHUNK_CHARS` para 3000 e aumente `TRANSLATION_DELAY_SECONDS` para 15.

@@ -4,6 +4,7 @@ import json
 import math
 import shutil
 import tempfile
+import time
 import subprocess
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -17,7 +18,7 @@ from docx import Document
 from docx.shared import Pt
 from groq import Groq
 
-app = FastAPI(title="Worker Telegram → Groq → DOCX", version="6.0.0")
+app = FastAPI(title="Worker Telegram → Groq → DOCX", version="7.0.0")
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -48,7 +49,7 @@ def root():
     return {
         "ok": True,
         "service": "transcritor-groq-worker",
-        "version": "6.0.0",
+        "version": "7.0.0",
         "routes": [
             "/health",
             "/process-telegram-media",
@@ -61,11 +62,13 @@ def root():
 def health():
     return {
         "ok": True,
-        "version": "6.0.0",
+        "version": "7.0.0",
         "groq_key_configured": bool(GROQ_API_KEY),
         "telegram_token_configured": bool(TELEGRAM_BOT_TOKEN),
         "transcription_model": GROQ_TRANSCRIPTION_MODEL,
         "translation_model": GROQ_TRANSLATION_MODEL,
+        "translation_chunk_chars": os.getenv("TRANSLATION_CHUNK_CHARS", "4500"),
+        "translation_delay_seconds": os.getenv("TRANSLATION_DELAY_SECONDS", "8"),
     }
 
 
@@ -271,32 +274,44 @@ def transcribe_audio(audio_path: Path, workdir: Path) -> Dict[str, Any]:
     }
 
 
-def translate_to_ptbr(text: str) -> str:
-    if not text.strip():
-        return ""
-
-    if not client:
-        raise RuntimeError("GROQ_API_KEY não configurada no Railway.")
-
-    # Divide para evitar prompt grande demais.
+def split_text_for_translation(text: str, max_chars: int = 4500) -> List[str]:
+    """
+    Divide o texto em blocos pequenos para não estourar limite de TPM da Groq.
+    max_chars 4500 costuma ficar abaixo de 12000 tokens/min com folga por chamada.
+    """
+    paragraphs = [p.strip() for p in text.split("
+") if p.strip()]
     parts = []
-    max_chars = 9000
     current = []
     current_len = 0
-    for paragraph in text.split("\n"):
-        if current_len + len(paragraph) > max_chars and current:
-            parts.append("\n".join(current))
-            current = []
-            current_len = 0
-        current.append(paragraph)
-        current_len += len(paragraph) + 1
-    if current:
-        parts.append("\n".join(current))
 
-    translated_parts = []
-    for i, part in enumerate(parts, start=1):
-        prompt = f"""
-Traduza o texto abaixo para português brasileiro.
+    for paragraph in paragraphs:
+        # Se um parágrafo sozinho for grande, quebra por frases/pedaços.
+        if len(paragraph) > max_chars:
+            chunks = [paragraph[i:i + max_chars] for i in range(0, len(paragraph), max_chars)]
+        else:
+            chunks = [paragraph]
+
+        for chunk in chunks:
+            if current and current_len + len(chunk) + 1 > max_chars:
+                parts.append("
+".join(current).strip())
+                current = []
+                current_len = 0
+
+            current.append(chunk)
+            current_len += len(chunk) + 1
+
+    if current:
+        parts.append("
+".join(current).strip())
+
+    return [p for p in parts if p]
+
+
+def translate_chunk_with_retry(part: str, index: int, total: int) -> str:
+    prompt = f"""
+Traduza o bloco {index}/{total} abaixo para português brasileiro.
 
 Regras:
 - Mantenha máxima fidelidade ao texto original.
@@ -311,17 +326,57 @@ Texto:
 {part}
 """.strip()
 
-        completion = client.chat.completions.create(
-            model=GROQ_TRANSLATION_MODEL,
-            messages=[
-                {"role": "system", "content": "Você é um tradutor profissional de copy, VSL e anúncios para português brasileiro."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0,
-        )
-        translated_parts.append(completion.choices[0].message.content.strip())
+    last_error = None
 
-    return "\n\n".join(translated_parts).strip()
+    for attempt in range(1, 6):
+        try:
+            completion = client.chat.completions.create(
+                model=GROQ_TRANSLATION_MODEL,
+                messages=[
+                    {"role": "system", "content": "Você é um tradutor profissional de copy, VSL e anúncios para português brasileiro."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+            )
+            return completion.choices[0].message.content.strip()
+
+        except Exception as exc:
+            last_error = exc
+            error_text = str(exc)
+
+            # Se bater rate limit ou tamanho, espera e tenta de novo.
+            if "rate_limit_exceeded" in error_text or "Request too large" in error_text or "tokens per minute" in error_text or "TPM" in error_text:
+                wait_seconds = 70 if attempt < 5 else 90
+                print(f"Rate limit na tradução bloco {index}/{total}. Tentativa {attempt}/5. Aguardando {wait_seconds}s.")
+                time.sleep(wait_seconds)
+                continue
+
+            raise
+
+    raise RuntimeError(f"Falha ao traduzir bloco {index}/{total} após retries: {last_error}")
+
+
+def translate_to_ptbr(text: str) -> str:
+    if not text.strip():
+        return ""
+
+    if not client:
+        raise RuntimeError("GROQ_API_KEY não configurada no Railway.")
+
+    parts = split_text_for_translation(text, max_chars=int(os.getenv("TRANSLATION_CHUNK_CHARS", "4500")))
+    translated_parts = []
+
+    for i, part in enumerate(parts, start=1):
+        print(f"Traduzindo bloco {i}/{len(parts)} com {len(part)} caracteres...")
+        translated_parts.append(translate_chunk_with_retry(part, i, len(parts)))
+
+        # Pequena pausa entre chamadas para reduzir chance de TPM.
+        if i < len(parts):
+            time.sleep(int(os.getenv("TRANSLATION_DELAY_SECONDS", "8")))
+
+    return "
+
+".join(translated_parts).strip()
 
 
 def fmt_time(seconds: float) -> str:
