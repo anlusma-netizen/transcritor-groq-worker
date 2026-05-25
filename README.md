@@ -1,6 +1,6 @@
 # Worker Telegram → Groq → DOCX
 
-Versão 8. Corrige limite de tokens da Groq dividindo a tradução em blocos menores. Arquivo validado contra erro de sintaxe.
+Versão 9. Gera PDF em vez de DOCX, remove timestamps, evita duplicar transcrição em português e destaca poucas frases importantes em negrito.
 
 ## Rotas
 
